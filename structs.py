@@ -1,16 +1,11 @@
 import ctypes 
 import re
+import os
 import collections
 
 # binary c structures
 
-class derivative_t(ctypes.Structure)
-    __fields__ = [("mass", ctypes.c_double)
-				  ("eccentricity", ctypes.c_double)
-				  ("specific_angular_momentum",  ctypes.c_double)
-				  ("other", ctypes.c_double)]
-
-
+BINARY_C_DIR  = os.path.expandvars('$HOME/src/binary_c')
 
 filename = BINARY_C_DIR+"/src/binary_c_structures.h"
 
@@ -22,7 +17,7 @@ add = False
 skip = False
 for i in lines:
 	ii=i.strip()
-	if ii.startswith('/*') and '*/' in ii:
+	if (ii.startswith('/*') and '*/' in ii) or ii.startswith('//'):
 		continue
 	if ii.startswith('/*'):
 		skip=True
@@ -61,6 +56,16 @@ for idi,i in enumerate(s):
 			ifdef = ''
 			continue
 		
+		ll=[]
+		x=''
+		for i in l:
+			if set(i)<=set('*'):
+				x=i
+			else:
+				ll.append(x+i)
+				x=''
+		l=ll
+		
 		typ=[]
 		if l[0] == 'struct':
 			for k in l[2:]:
@@ -78,9 +83,41 @@ for idi,i in enumerate(s):
 			for k in l[1:]:
 				p = k.count('*') + l[0].count('*')
 				res[name][k] = {'type':l[0],'struct':False,'spec':True,'ifdef':ifdef,'pointer':p}
-		print(res[name][k])
+		print(name,k,res[name][k])
 	print()
 
+#resolve unknown types
+files = [BINARY_C_DIR+"/src/binary_c_types.h",
+		BINARY_C_DIR+"/src/supernovae/sn.h"]
+
+lines=[]
+for i in files:
+	with open(i,'r') as f:
+		lines.extend(f.readlines())
+	
+bctypes={}
+for i in lines:
+	if '#define' in i:
+		z=i.split()
+		bctypes[z[1]]=' '.join(z[2:])
+
+
+for i in res:
+	for j in res[i]:
+		if res[i][j]['spec']:
+			try:
+				t = bctypes[res[i][j]['type']]
+			except KeyError:
+				print("Can't match "+str(res[i][j]['type'])+" for "+str(i)+" "+str(j))
+				continue
+			res[i][j]['spec']=False
+			if 'strcut' in t:
+				res[i][j]['struct']=True
+				res[i][j]['type'] = t.split()[1]
+			else:
+				res[i][j]['type'] = t
+			
+# Only things left are FILE, jmp_buf and size_t
 			
 		
 		
