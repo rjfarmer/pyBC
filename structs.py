@@ -3,13 +3,14 @@ import os
 import collections
 import re
 import subprocess
+import numpy as np
 
 import utils
 
 # binary c structures
 
 allStructs={}
-
+arraySize={}
 
 def check_enabled():
 	# Find which flags have been enabled:
@@ -44,6 +45,7 @@ def get_structs():
 	for i in lines:
 		ii=i.strip()
 		if (ii.startswith('/*') and '*/' in ii) or ii.startswith('//'):
+			skip=False
 			continue
 		if ii.startswith('/*'):
 			skip=True
@@ -128,16 +130,13 @@ def get_structs():
 			z=i.split()
 			bctypes[z[1]]=' '.join(z[2:])
 	
-	sizes = ctypes.cdll.LoadLibrary(utils.get_cutils_loc())
-	jmp_buf_size = sizes.get_jmp_buf()
-	
-	skip = {"FILE":ctypes.sizeof(ctypes.c_void_p),"size_t":ctypes.c_size_t,"jmp_buf":jmp_buf_size}
+	skip = set(("FILE","size_t","jmp_buf"))
 	
 	for i in res:
 		for j in res[i]:
 			if res[i][j]['spec']:
-				if res[i][j]['type'] in skip.keys():
-					res[i][j]['size'] = skip[res[i][j]['type']]
+				if res[i][j]['type'] in skip:
+					res[i][j]['size'] = None
 					continue
 				try:
 					t = bctypes[res[i][j]['type']]
@@ -150,7 +149,7 @@ def get_structs():
 					res[i][j]['type'] = t.split()[1]
 				else:
 					res[i][j]['type'] = t
-				
+					
 	#Remove unneeded elements
 	flagsOn = check_enabled()
 	for i in list(res.keys()):
@@ -173,6 +172,8 @@ def get_structs():
 						a, b = re.split("\(*\)",ii[1:-1])[0:2]
 						if not (a in flagsOn and b in flagsOn):
 							del res[i][j]
+
+					
 	return res
 		
 
@@ -186,7 +187,7 @@ def make_struct(name,names,types):
 def compute_dependencies(struct):
 	dep = []
 	for k,v in struct.items():
-		if v['struct']:
+		if v['struct'] and v['pointer'] == 0: #Skip pointers we dont need their actual size (its c_void_p)
 			dep.append(v['type'])
 	return list(set(dep))
 	
@@ -198,7 +199,7 @@ def order_struct_dependencies(struct_names):
 	for name,st in struct_names.items():
 		dep[name] = compute_dependencies(st)
 	
-	print(dep)
+	if(debug): print(dep)
 	
 	all_deps = list(dep.keys())
 	
@@ -206,7 +207,13 @@ def order_struct_dependencies(struct_names):
 	special_cases = ["hsearch_data"]
 	
 	lenOld = len(all_deps)
-	while len(all_deps):
+	max_loops = 100
+	while True:
+		if len(all_deps) == 0:
+			break
+		if max_loops == 0:
+			break
+		max_loops = max_loops -1
 		if(debug): print("Loop ",len(all_deps))
 		for key in all_deps:
 			if not len(dep[key]):
@@ -217,24 +224,49 @@ def order_struct_dependencies(struct_names):
 				for i in dep[key]:
 					if i in ordered_names or i in special_cases:
 						dep[key].remove(i)
-						if(debug): print("Removed",i,"from",key,"Remiaing",dep[key])
+						if(debug): print("Removed",i,"from",key,"Remaining",dep[key])
 
-		if len(all_deps) == lenOld:
-			print()
-			print("Failed to find")
-			fails = []
-			for k, v in dep.items():
-				fails.extend(v)
-			
-			for i in set(fails):
-				print(i)
-			break
-			
 		lenOld = len(all_deps)
-				
-	# print(ordered_names)				
+	if max_loops == 0:
+		print()
+		print("Failed to find")
+		fails = []
+		for k, v in dep.items():
+			fails.extend(v)
+		
+		for i in set(fails):
+			print(i)
+			
+		print()
+		print(dep)
+		
+	if debug: print(ordered_names)				
 	return ordered_names
 	
+	
+def get_array_size(value):
+	#This may be [X] or [X][Y] or [Align(X)]
+	value=value.replace("*",'').replace('Align(','').replace(')','')
+	value = value.split('[')[1:]
+	
+	s=[]
+	for i in value:
+		add=0
+		if '+' in i:
+			z=i.split('+')
+			add = int(z[1])
+			i=z[0]
+		if i.isdigit():
+			s.append(int(i))
+		elif i in arraySize:
+			s.append(arraySize[i])
+		else:	
+			# Search code for define
+			
+			
+		s[-1] = s[-1] + add
+	
+	return np.product(s)
 	
 		
 def build_structs():
@@ -251,20 +283,49 @@ def build_structs():
 			'FILE':ctypes.c_void_p,'size_t':ctypes.c_size_t,
 			'jmp_buf':ctypes.c_char*jmp_buf_size,
 			'unsigned long long int':ctypes.c_int64,
-			'void':ctypes.c_void_p
+			'long int':ctypes.c_int32,
+			'void':ctypes.c_void_p,
+			'hsearch_data':ctypes.c_void_p,
+			'unsigned int':ctypes.c_uint,
+			'double Aligned':ctypes.c_double, # Aligned elements may need some work?
+			'unsigned long long':ctypes.c_ulonglong,
+			'const char':ctypes.c_char,
+			'int Aligned':ctypes.c_int,
+			'char Aligned':ctypes.c_char
 			}
-		
+			
 	st = order_struct_dependencies(struct_names)	
+	print(st)
 		
-		# names = []
-		# types = []
-		# for k,s in st.items():
-			# names.append(k)
-			# t = mapTypes[s['type']]
-			# for i in range(s['pointer']):
-				# t = ctypes.POINTER(t)
-			# types.append(t)
-		# make_struct(name,names,types)
+	for key in st:
+		names = []
+		types = []
+		for k,s in struct_names[key].items():
+			skip_p=False # Skip one round of pointers 
+			names.append(k)
+			
+			if '[' in k:
+				print(k)
+				
+			if s['struct'] and s['pointer']:
+				# We make these c_void_p anyway so dont add extra wrappers
+				s['pointer'] = s['pointer'] - 1
+			
+			if s['type'] in mapTypes:
+				t = mapTypes[s['type']]
+			elif s['type'] in allStructs:
+				t = allStructs[s['type']]
+			else:
+				# If pointer to struct then we add c_void_p
+				if s['pointer']:
+					t = ctypes.c_void_p
+				else:
+					print("Cant find",s['type'],"for",key)
+				
+			for i in range(s['pointer']):
+				t = ctypes.POINTER(t)
+			types.append(t)
+			allStructs[key] = make_struct(key,names,types)
 			
 			
 	
